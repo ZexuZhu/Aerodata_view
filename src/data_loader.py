@@ -71,6 +71,10 @@ def load_excel(file_path: str, sheet_names: list[str]) -> dict:
             _load_precomputed_sheet(df, name, raw_data, excel_data, ref_params, global_ref)
             sheet_types[name] = "precomputed"
 
+        elif s_type == "control_surface":
+            _load_control_surface_sheet(df, name, raw_data, excel_data, ref_params, global_ref)
+            sheet_types[name] = "control_surface"
+
         else:
             skipped.append(name)
 
@@ -175,6 +179,74 @@ def _load_precomputed_sheet(df, name, raw_data, excel_data, ref_params, global_r
         excel_data[name] = edf
 
 
+def _load_control_surface_sheet(df, name, raw_data, excel_data,
+                                ref_params, global_ref):
+    """加载舵面参数 sheet：仅保留 eleup10 / eledown10 舵偏增量。"""
+    # 参考参数
+    ref = dict(global_ref)
+    for col in REF_COLS:
+        if col in df.columns:
+            val = (df[col].iloc[0] if pd.notna(df[col].iloc[0])
+                   else df[col].dropna().iloc[0])
+            ref[col] = val
+    ref_params[name] = ref
+
+    # 构型名从 H-I 合并列获取（Unnamed: 7, Unnamed: 8）
+    config_col = None
+    for i, col in enumerate(df.columns):
+        cs = str(col).strip()
+        if "Unnamed: 7" in cs or cs == "":
+            # 检查此列是否有典型构型名
+            sample = df.iloc[:, i].dropna()
+            if len(sample) > 0 and len(sample) < 10:
+                config_col = i
+                break
+    if config_col is None:
+        # 回退到位置 7（H 列）
+        config_col = 7 if df.shape[1] > 7 else None
+
+    if config_col is not None:
+        config_series = df.iloc[:, config_col].copy()
+        config_series = config_series.replace(r'^\s*$', np.nan, regex=True).ffill()
+        # strip 换行符和空格
+        df["__component__"] = config_series.apply(
+            lambda x: str(x).strip().replace('\n', '') if pd.notna(x) else "?")
+    else:
+        df["__component__"] = "?"
+
+    # 过滤 Standard 块（无舵偏增量）
+    df = df[~df["__component__"].str.contains("Standard", na=False)].copy()
+
+    # 重命名 delta 列：CY.1→dCY, Cl.1→dCl, Cm.1→dCm, Cn.1→dCn
+    rename_map = {}
+    for c in df.columns:
+        cs = str(c).strip()
+        if cs == "CY.1":
+            rename_map[c] = "dCY"
+        elif cs == "Cl.1":
+            rename_map[c] = "dCl"
+        elif cs == "Cm.1":
+            rename_map[c] = "dCm"
+        elif cs == "Cn.1":
+            rename_map[c] = "dCn"
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # 原始数据列
+    plot_cols = ["alpha", "beta", "vel", "dCD", "dCL", "dCY", "dCl", "dCm",
+                 "dCn", "__component__"]
+    available = [c for c in plot_cols if c in df.columns or c == "__component__"]
+    raw_data[name] = df[available].copy()
+
+    # Excel 列（存储供参考，不验证）
+    numeric_cols = [c for c in df.columns
+                    if c != "__component__" and pd.api.types.is_numeric_dtype(df[c])]
+    if numeric_cols:
+        edf = df[numeric_cols].copy()
+        edf["__component__"] = df["__component__"]
+        excel_data[name] = edf
+
+
 # ================================================================
 #  辅助函数
 # ================================================================
@@ -185,8 +257,12 @@ def _detect_sheet_type(df: pd.DataFrame) -> str:
     has_cd = "CD" in df.columns
     has_component = _find_component_column(df) is not None
 
+    has_dcd = "dCD" in df.columns and "dCL" in df.columns
+
     if has_axis and has_component:
         return "component"
+    elif has_dcd:
+        return "control_surface"
     elif has_cd and not has_axis:
         return "precomputed"
     else:

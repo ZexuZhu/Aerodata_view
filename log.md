@@ -2,6 +2,16 @@
 
 ## 项目：Aerodata View — 气动数据可视化工具
 
+### 2026-06-07 — 舵面参数 sheet 支持
+
+**新增 control_surface 类型**
+- 检测：有 dCD 且 dCL 列 → control_surface
+- H-I 合并列提取构型名（ffill + strip）
+- 过滤 Standard 块（仅保留 eleup10 / eledown10）
+- Delta 列重命名：CY.1→dCY, Cl.1→dCl, Cm.1→dCm, Cn.1→dCn
+- 新增绘图变量：dCD, dCL, dCY, dCl, dCm, dCn（19 变量总计）
+- 模糊匹配仅限特殊变量，避免"CD"误匹配"dCD"
+
 ### 2026-06-07 — 扩充：固定构型气动参数 sheet
 
 **data_loader 重构**

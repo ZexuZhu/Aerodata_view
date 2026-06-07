@@ -16,7 +16,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 
 from src.data_loader import get_sheet_names, load_excel
-from src.data_processor import (process_all, PLOT_VARIABLES, PRECOMPUTED_VARS,
+from src.data_processor import (process_all, PLOT_VARIABLES,
                                 get_plot_variables, resolve_column_name)
 from src.validator import validate
 from src.plot_widget import AeroCanvas
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         self._processing_done: bool = False
         self._sheet_types: dict = {}
         self._has_precomputed: bool = False
+        self._has_control_surface: bool = False
 
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
@@ -285,6 +286,7 @@ class MainWindow(QMainWindow):
         self._components = result["components"]
         self._sheet_types = result.get("sheet_types", {})
         self._has_precomputed = "precomputed" in self._sheet_types.values()
+        self._has_control_surface = "control_surface" in self._sheet_types.values()
 
         try:
             self._processed_data = process_all(
@@ -342,6 +344,7 @@ class MainWindow(QMainWindow):
         self._processing_done = False
         self._sheet_types = {}
         self._has_precomputed = False
+        self._has_control_surface = False
 
         for cb in self._sheet_checkboxes.values():
             cb.setEnabled(True)
@@ -486,7 +489,8 @@ class MainWindow(QMainWindow):
 
     def _update_plot_variables(self):
         """根据已加载 sheet 类型动态更新变量下拉列表。"""
-        vars_dict = get_plot_variables(self._has_precomputed)
+        vars_dict = get_plot_variables(self._has_precomputed,
+                                        self._has_control_surface)
         current_x = self._combo_x.currentText()
         current_y = self._combo_y.currentText()
 

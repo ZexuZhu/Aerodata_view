@@ -150,8 +150,8 @@ def process_all(raw_data: dict, ref_params: dict,
     processed = {}
     for sheet_name, df in raw_data.items():
         s_type = sheet_types.get(sheet_name, "component") if sheet_types else "component"
-        if s_type == "precomputed":
-            # precomputed sheet 不处理，直接使用 Excel 列
+        if s_type in ("precomputed", "control_surface"):
+            # precomputed / control_surface 不处理，直接使用 Excel 列
             processed[sheet_name] = df.copy()
         else:
             processed[sheet_name] = process_sheet(df, ref_params[sheet_name])
@@ -176,23 +176,29 @@ PLOT_VARIABLES = {
     "CL1.5/CD": "calc_CL15_CD",
 }
 
-# precomputed sheet 专属变量（映射到 Excel 原始列名）
+# precomputed sheet 专属变量
 PRECOMPUTED_VARS = {
     "dCm/dCL": "dCm/dCL",
 }
 
-def get_plot_variables(has_precomputed: bool = False) -> dict:
-    """返回当前可用的绘图变量。
+# control_surface sheet 专属变量（舵面六分量增量）
+CONTROL_SURFACE_VARS = {
+    "dCD": "dCD",
+    "dCL": "dCL",
+    "dCY": "dCY",
+    "dCl": "dCl",
+    "dCm": "dCm",
+    "dCn": "dCn",
+}
 
-    Args:
-        has_precomputed: 是否加载了 precomputed 类型 sheet
-
-    Returns:
-        {显示名: 列名}
-    """
+def get_plot_variables(has_precomputed: bool = False,
+                       has_control_surface: bool = False) -> dict:
+    """返回当前可用的绘图变量。"""
     vars_dict = dict(PLOT_VARIABLES)
     if has_precomputed:
         vars_dict.update(PRECOMPUTED_VARS)
+    if has_control_surface:
+        vars_dict.update(CONTROL_SURFACE_VARS)
     return vars_dict
 
 def resolve_column_name(var_name: str, df_columns: list) -> str:
@@ -206,6 +212,10 @@ def resolve_column_name(var_name: str, df_columns: list) -> str:
         target = PRECOMPUTED_VARS[var_name]
         if target in df_columns:
             return target
+    if var_name in CONTROL_SURFACE_VARS:
+        target = CONTROL_SURFACE_VARS[var_name]
+        if target in df_columns:
+            return target
     if var_name in PLOT_VARIABLES:
         col = PLOT_VARIABLES[var_name]
         if col in df_columns:
@@ -214,11 +224,13 @@ def resolve_column_name(var_name: str, df_columns: list) -> str:
         if col.startswith("calc_") and col[5:] in df_columns:
             return col[5:]
 
-    # 模糊匹配（大小写不敏感，处理中文后缀如 "dCm/dCL稳定性"）
-    vn_lower = var_name.lower()
-    for c in df_columns:
-        cs = str(c).lower()
-        if vn_lower in cs or cs.startswith(vn_lower):
-            return c
+    # 模糊匹配（仅对特殊变量使用，避免 "CD" 误匹配 "dCD"）
+    special_vars = {**PRECOMPUTED_VARS, **CONTROL_SURFACE_VARS}
+    if var_name in special_vars:
+        vn_lower = var_name.lower()
+        for c in df_columns:
+            cs = str(c).lower()
+            if cs == vn_lower or cs.startswith(vn_lower):
+                return c
 
     return var_name
