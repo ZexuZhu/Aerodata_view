@@ -47,6 +47,7 @@ def load_excel(file_path: str, sheet_names: list[str]) -> dict:
     excel_data = {}
     ref_params = {}
     sheet_types = {}
+    standard_baseline = {}
     skipped = []
 
     # 先尝试从"基本数据" sheet 读取参考参数
@@ -72,7 +73,8 @@ def load_excel(file_path: str, sheet_names: list[str]) -> dict:
             sheet_types[name] = "precomputed"
 
         elif s_type == "control_surface":
-            _load_control_surface_sheet(df, name, raw_data, excel_data, ref_params, global_ref)
+            _load_control_surface_sheet(df, name, raw_data, excel_data,
+                                        ref_params, standard_baseline, global_ref)
             sheet_types[name] = "control_surface"
 
         else:
@@ -86,6 +88,7 @@ def load_excel(file_path: str, sheet_names: list[str]) -> dict:
         "ref_params": ref_params,
         "components": final_components,
         "sheet_types": sheet_types,
+        "standard_baseline": standard_baseline,
         "skipped": skipped,
     }
 
@@ -180,7 +183,7 @@ def _load_precomputed_sheet(df, name, raw_data, excel_data, ref_params, global_r
 
 
 def _load_control_surface_sheet(df, name, raw_data, excel_data,
-                                ref_params, global_ref):
+                                ref_params, standard_baseline, global_ref):
     """加载舵面参数 sheet：仅保留 eleup10 / eledown10 舵偏增量。"""
     # 参考参数
     ref = dict(global_ref)
@@ -214,10 +217,16 @@ def _load_control_surface_sheet(df, name, raw_data, excel_data,
     else:
         df["__component__"] = "?"
 
-    # 过滤 Standard 块（无舵偏增量）
+    # 保存 Standard 块（供配平计算）
+    df_standard = df[df["__component__"].str.contains("Standard", na=False)].copy()
+    if len(df_standard) > 0:
+        base_cols = ["alpha", "CD", "CL", "CY", "Cl", "Cm", "Cn"]
+        available = [c for c in base_cols if c in df_standard.columns]
+        standard_baseline[name] = df_standard[available].copy()
+    # 过滤 Standard 块（无舵偏增量，不参与绘图）
     df = df[~df["__component__"].str.contains("Standard", na=False)].copy()
 
-    # 重命名 delta 列：CY.1→dCY, Cl.1→dCl, Cm.1→dCm, Cn.1→dCn
+    # 重命名 delta 列
     rename_map = {}
     for c in df.columns:
         cs = str(c).strip()

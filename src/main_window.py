@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QComboBox, QCheckBox, QLabel,
     QFileDialog, QGroupBox, QMessageBox, QDialog,
-    QTableWidget, QTableWidgetItem, QDialogButtonBox,
+    QTableWidget, QTableWidgetItem, QDialogButtonBox, QDoubleSpinBox,
     QScrollArea, QFrame, QSplitter, QGridLayout,
 )
 from PyQt6.QtCore import Qt, QTimer
@@ -20,6 +20,7 @@ from src.data_processor import (process_all, PLOT_VARIABLES,
                                 get_plot_variables, resolve_column_name)
 from src.validator import validate
 from src.plot_widget import AeroCanvas
+from src.trim_calculator import calculate_trim, RHO
 
 DEBOUNCE_MS = 300
 
@@ -44,6 +45,8 @@ class MainWindow(QMainWindow):
         self._sheet_types: dict = {}
         self._has_precomputed: bool = False
         self._has_control_surface: bool = False
+        self._standard_baseline: dict = {}
+        self._trim_available: bool = False
 
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
@@ -198,6 +201,39 @@ class MainWindow(QMainWindow):
         self._btn_validate.setEnabled(False)
         layout.addWidget(self._btn_validate)
 
+        # ---- 配平计算 ----
+        trim_group = QGroupBox("配平计算")
+        trim_layout = QVBoxLayout(trim_group)
+
+        # 输入行
+        trim_input = QGridLayout()
+        trim_input.addWidget(QLabel("V (m/s):"), 0, 0)
+        self._trim_V = self._make_spin(30, 1, 200, 1, "m/s")
+        trim_input.addWidget(self._trim_V, 0, 1)
+        trim_input.addWidget(QLabel("W (N):"), 1, 0)
+        self._trim_W = self._make_spin(10, 0.1, 10000, 1, "N")
+        trim_input.addWidget(self._trim_W, 1, 1)
+        trim_input.addWidget(QLabel("δref (°):"), 2, 0)
+        self._trim_dref = self._make_spin(10, 1, 90, 1, "°")
+        trim_input.addWidget(self._trim_dref, 2, 1)
+        trim_layout.addLayout(trim_input)
+
+        self._btn_trim = QPushButton("计算配平")
+        self._btn_trim.clicked.connect(self._on_trim_calc)
+        self._btn_trim.setEnabled(False)
+        trim_layout.addWidget(self._btn_trim)
+
+        # 结果
+        self._label_trim_result = QLabel("")
+        self._label_trim_result.setStyleSheet("font-size: 11px; line-height: 1.5;")
+        self._label_trim_result.setWordWrap(True)
+        trim_layout.addWidget(self._label_trim_result)
+        self._label_trim_hint = QLabel("（需加载固定构型 + 舵面参数）")
+        self._label_trim_hint.setStyleSheet("color: gray; font-size: 10px;")
+        trim_layout.addWidget(self._label_trim_hint)
+
+        layout.addWidget(trim_group)
+
         # ---- 状态 ----
         self._label_status = QLabel("")
         self._label_status.setStyleSheet("color: gray; font-size: 11px;")
@@ -287,6 +323,13 @@ class MainWindow(QMainWindow):
         self._sheet_types = result.get("sheet_types", {})
         self._has_precomputed = "precomputed" in self._sheet_types.values()
         self._has_control_surface = "control_surface" in self._sheet_types.values()
+        self._standard_baseline = result.get("standard_baseline", {})
+        self._trim_available = (self._has_precomputed and self._has_control_surface)
+        self._btn_trim.setEnabled(self._trim_available)
+        if not self._trim_available:
+            self._label_trim_hint.setText("（需加载固定构型 + 舵面参数）")
+        else:
+            self._label_trim_hint.setText("")
 
         try:
             self._processed_data = process_all(
@@ -345,6 +388,11 @@ class MainWindow(QMainWindow):
         self._sheet_types = {}
         self._has_precomputed = False
         self._has_control_surface = False
+        self._standard_baseline = {}
+        self._trim_available = False
+        self._btn_trim.setEnabled(False)
+        self._label_trim_result.setText("")
+        self._label_trim_hint.setText("（需加载固定构型 + 舵面参数）")
 
         for cb in self._sheet_checkboxes.values():
             cb.setEnabled(True)
@@ -479,6 +527,115 @@ class MainWindow(QMainWindow):
 
         self._btn_comp_all.setEnabled(True)
         self._btn_comp_none.setEnabled(True)
+
+    @staticmethod
+    def _make_spin(default, minv, maxv, step, suffix):
+        """快速创建 QDoubleSpinBox。"""
+        sp = QDoubleSpinBox()
+        sp.setRange(minv, maxv)
+        sp.setValue(default)
+        sp.setSingleStep(step)
+        sp.setSuffix(f" {suffix}")
+        sp.setDecimals(1)
+        return sp
+
+    def _on_trim_calc(self):
+        """执行配平计算。"""
+        if not self._trim_available:
+            return
+
+        V = self._trim_V.value()
+        W = self._trim_W.value()
+        dref = self._trim_dref.value()
+
+        # 获取固定构型 β=0° 数据
+        baseline = None
+        for name, df in self._processed_data.items():
+            if self._sheet_types.get(name) == "precomputed":
+                # 取 β=0° 子集
+                comps = df["__component__"].unique()
+                beta0_comp = [c for c in comps if "β=0" in str(c)]
+                if beta0_comp:
+                    bdf = df[df["__component__"] == beta0_comp[0]].sort_values("alpha")
+                else:
+                    bdf = df.sort_values("alpha")
+                # 需要 CL/CD/Cmnew — precomputed sheet 有这些列
+                # 使用 resolve_column_name 查找
+                cl_col = resolve_column_name("CL", bdf.columns.tolist())
+                cd_col = resolve_column_name("CD", bdf.columns.tolist())
+                cm_col = resolve_column_name("Cmnew", bdf.columns.tolist())
+                if cl_col in bdf.columns and cd_col in bdf.columns and cm_col in bdf.columns:
+                    baseline = {
+                        "alpha": bdf["alpha"].values,
+                        "CL": bdf[cl_col].values,
+                        "CD": bdf[cd_col].values,
+                        "Cmnew": bdf[cm_col].values,
+                    }
+                break
+
+        if baseline is None:
+            QMessageBox.warning(self, "无基准数据", "未找到固定构型气动参数数据。")
+            return
+
+        # 获取舵面参数
+        cs = None
+        for name, df in self._processed_data.items():
+            if self._sheet_types.get(name) == "control_surface":
+                # 根据 Cm 符号选方向
+                cs_alpha = df["alpha"].values
+                cs_comps = df["__component__"].unique()
+                # 在 range 中取 Cm 符号
+                cl_arr = baseline["CL"]
+                mid_idx = len(cl_arr) // 2
+                cm_mid = baseline["Cmnew"][mid_idx]
+
+                if cm_mid > 0:
+                    target = [c for c in cs_comps if "eleup" in str(c).lower()]
+                else:
+                    target = [c for c in cs_comps if "eledown" in str(c).lower()]
+                if not target:
+                    QMessageBox.warning(self, "舵面数据", "未找到匹配的舵面构型。")
+                    return
+
+                cs_df = df[df["__component__"] == target[0]].sort_values("alpha")
+                dcd_col = resolve_column_name("dCD", cs_df.columns.tolist())
+                dcl_col = resolve_column_name("dCL", cs_df.columns.tolist())
+                dcm_col = resolve_column_name("dCm", cs_df.columns.tolist())
+                cs = {
+                    "alpha": cs_df["alpha"].values,
+                    "dCD": cs_df[dcd_col].values,
+                    "dCL": cs_df[dcl_col].values,
+                    "dCm": cs_df[dcm_col].values,
+                }
+                break
+
+        if cs is None:
+            QMessageBox.warning(self, "无舵面数据", "未找到舵面参数数据。")
+            return
+
+        # 计算
+        try:
+            r = calculate_trim(V, W, dref, baseline, cs)
+        except ValueError as e:
+            QMessageBox.warning(self, "配平失败", str(e))
+            return
+
+        if r is None:
+            QMessageBox.warning(self, "配平失败", "计算未收敛，请检查输入参数。")
+            return
+
+        self._label_trim_result.setText(
+            f"α_req = {r['alpha_req']:.2f}°  |  "
+            f"δe_trim = {r['delta_trim']:+.2f}°  |  "
+            f"CL_req = {r['CL_req']:.4f}\n"
+            f"CL_trim = {r['CL_trim']:.4f}  |  "
+            f"CD_trim = {r['CD_trim']:.4f}  |  "
+            f"L/D_trim = {r['LD_trim']:.2f}\n"
+            f"L/D_base = {r['LD_base']:.2f}  |  "
+            f"CL损失 = {r['CL_loss_pct']:.1f}%  |  "
+            f"CD增加 = {r['CD_inc_pct']:.1f}%  |  "
+            f"L/D损失 = {r['LD_loss_pct']:.1f}%"
+        )
 
     def _remove_percentage_vars(self):
         for combo in [self._combo_x, self._combo_y]:

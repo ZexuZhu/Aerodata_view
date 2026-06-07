@@ -12,6 +12,21 @@
 - 新增绘图变量：dCD, dCL, dCY, dCl, dCm, dCn（19 变量总计）
 - 模糊匹配仅限特殊变量，避免"CD"误匹配"dCD"
 
+### 2026-06-07 — 交互式配平计算
+
+**新增 trim_calculator.py**
+- `calculate_trim()` — 基于固定构型基准数据 + 舵面增量数据的配平计算
+- numpy.interp 线性插值，单步近似（工程精度足够）
+- 自动根据 Cm 符号选择 eleup10/eledown10
+- CL_req 超出范围时报错
+
+**data_loader 改动**
+- `_load_control_surface_sheet` 保留 Standard 块供配平（standard_baseline 字段）
+
+**main_window 改动**
+- 左侧底部配平 UI：V/W/δref 输入 + 计算按钮 + 7 项结果
+- 仅加载固定构型 + 舵面参数时启用
+
 ### 2026-06-07 — 扩充：固定构型气动参数 sheet
 
 **data_loader 重构**
