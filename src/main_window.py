@@ -5,6 +5,9 @@
 """
 
 import os
+import re
+from datetime import datetime
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QComboBox, QCheckBox, QLabel,
@@ -12,8 +15,8 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QDialogButtonBox, QDoubleSpinBox,
     QScrollArea, QFrame, QSplitter, QGridLayout,
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QTimer, QSettings, QUrl
+from PyQt6.QtGui import QFont, QDesktopServices
 
 from src.data_loader import get_sheet_names, load_excel
 from src.data_processor import (process_all, PLOT_VARIABLES,
@@ -23,6 +26,9 @@ from src.plot_widget import AeroCanvas
 from src.trim_calculator import calculate_trim, RHO
 
 DEBOUNCE_MS = 300
+
+APP_SETTINGS = QSettings("AerodataView", "AerodataView")
+SCREENSHOT_DPI = 600
 
 
 class MainWindow(QMainWindow):
@@ -47,6 +53,8 @@ class MainWindow(QMainWindow):
         self._has_control_surface: bool = False
         self._standard_baseline: dict = {}
         self._trim_available: bool = False
+        self._screenshot_path: str = APP_SETTINGS.value("screenshot/save_path", "")
+        self._last_file_dir: str = APP_SETTINGS.value("file/last_dir", "")
 
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
@@ -201,6 +209,9 @@ class MainWindow(QMainWindow):
         self._btn_validate.setEnabled(False)
         layout.addWidget(self._btn_validate)
 
+        # ---- 截图保存 ----
+        layout.addWidget(self._build_screenshot_group())
+
         # ---- 配平计算 ----
         trim_group = QGroupBox("配平计算")
         trim_layout = QVBoxLayout(trim_group)
@@ -208,13 +219,16 @@ class MainWindow(QMainWindow):
         # 输入行
         trim_input = QGridLayout()
         trim_input.addWidget(QLabel("V (m/s):"), 0, 0)
-        self._trim_V = self._make_spin(30, 1, 200, 1, "m/s")
+        self._trim_V = self._make_spin(
+            float(APP_SETTINGS.value("trim/V", 30)), 1, 200, 1, "m/s")
         trim_input.addWidget(self._trim_V, 0, 1)
         trim_input.addWidget(QLabel("W (N):"), 1, 0)
-        self._trim_W = self._make_spin(10, 0.1, 10000, 1, "N")
+        self._trim_W = self._make_spin(
+            float(APP_SETTINGS.value("trim/W", 10)), 0.1, 10000, 1, "N")
         trim_input.addWidget(self._trim_W, 1, 1)
         trim_input.addWidget(QLabel("δref (°):"), 2, 0)
-        self._trim_dref = self._make_spin(10, 1, 90, 1, "°")
+        self._trim_dref = self._make_spin(
+            float(APP_SETTINGS.value("trim/dref", 10)), 1, 90, 1, "°")
         trim_input.addWidget(self._trim_dref, 2, 1)
         trim_layout.addLayout(trim_input)
 
@@ -255,18 +269,50 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._canvas, 1)
         return right
 
+    def _build_screenshot_group(self) -> QGroupBox:
+        """构建截图保存分组。"""
+        group = QGroupBox("截图保存")
+        layout = QVBoxLayout(group)
+
+        # 路径设置行
+        path_row = QHBoxLayout()
+        self._btn_ss_path = QPushButton("设置保存路径")
+        self._btn_ss_path.clicked.connect(self._on_set_screenshot_path)
+        self._label_ss_path = QLabel(
+            self._screenshot_path or "未设置")
+        if not self._screenshot_path:
+            self._label_ss_path.setStyleSheet("color: gray; font-size: 11px;")
+        else:
+            self._label_ss_path.setStyleSheet("font-size: 11px;")
+        self._label_ss_path.setWordWrap(True)
+        path_row.addWidget(self._btn_ss_path)
+        path_row.addWidget(self._label_ss_path, 1)
+        layout.addLayout(path_row)
+
+        # 截图按钮
+        self._btn_screenshot = QPushButton("截图")
+        self._btn_screenshot.clicked.connect(self._on_screenshot)
+        self._btn_screenshot.setStyleSheet(
+            "QPushButton { font-weight: bold; padding: 5px 16px; }")
+        self._btn_screenshot.setEnabled(False)
+        layout.addWidget(self._btn_screenshot)
+
+        return group
+
     # ================================================================
     #  事件处理
     # ================================================================
 
     def _on_select_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择气动数据 Excel 文件", "",
+            self, "选择气动数据 Excel 文件", self._last_file_dir,
             "Excel 文件 (*.xlsx *.xls);;所有文件 (*)")
         if not path:
             return
 
         self._file_path = path
+        self._last_file_dir = os.path.dirname(path)
+        APP_SETTINGS.setValue("file/last_dir", self._last_file_dir)
         self._label_file.setText(os.path.basename(path))
         self._label_file.setStyleSheet("font-size: 11px;")
 
@@ -364,6 +410,7 @@ class MainWindow(QMainWindow):
         self._processing_done = True
         self._btn_reload.setEnabled(True)
         self._btn_validate.setEnabled(True)
+        self._btn_screenshot.setEnabled(True)
 
         skipped = result.get("skipped", [])
         skip_msg = ""
@@ -411,6 +458,7 @@ class MainWindow(QMainWindow):
         self._btn_process.setEnabled(True)
         self._btn_reload.setEnabled(False)
         self._btn_validate.setEnabled(False)
+        self._btn_screenshot.setEnabled(False)
         self._btn_comp_all.setEnabled(False)
         self._btn_comp_none.setEnabled(False)
         self._label_status.setText("已重置")
@@ -431,6 +479,76 @@ class MainWindow(QMainWindow):
 
         dlg = ValidationDialog(result, self)
         dlg.exec()
+
+    # ================================================================
+    #  截图
+    # ================================================================
+
+    def _on_set_screenshot_path(self):
+        """设置截图保存文件夹。"""
+        path = QFileDialog.getExistingDirectory(self, "选择截图保存文件夹")
+        if not path:
+            return
+        self._screenshot_path = path
+        APP_SETTINGS.setValue("screenshot/save_path", path)
+        self._label_ss_path.setText(path)
+        self._label_ss_path.setStyleSheet("font-size: 11px;")
+
+    def _on_screenshot(self):
+        """执行截图并保存。"""
+        # 未设路径 → 直接弹文件夹选择
+        if not self._screenshot_path:
+            self._on_set_screenshot_path()
+            if not self._screenshot_path:
+                return  # 用户取消了
+
+        # 确保文件夹存在
+        os.makedirs(self._screenshot_path, exist_ok=True)
+
+        # 生成文件名
+        x_var = self._combo_x.currentText() or "X"
+        y_var = self._combo_y.currentText() or "Y"
+        sheets = self._get_selected_sheets()
+        sheet_part = "+".join(sheets[:3])  # 最多 3 个 sheet 名，防过长
+        if len(sheets) > 3:
+            sheet_part += f"+等{len(sheets)}个"
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")
+        safe_x = re.sub(r'[^\w\s-]', '_', x_var).strip()
+        safe_y = re.sub(r'[^\w\s-]', '_', y_var).strip()
+        safe_sheet = re.sub(r'[^\w\s-]', '_', sheet_part).strip()
+        filename = f"Aerodata_{safe_sheet}_{safe_y}_vs_{safe_x}_{timestamp}.png"
+        filepath = os.path.join(self._screenshot_path, filename)
+
+        # 防双击：禁用按钮
+        self._btn_screenshot.setEnabled(False)
+        try:
+            self._canvas.fig.savefig(filepath, dpi=SCREENSHOT_DPI,
+                                     bbox_inches="tight")
+        except Exception as e:
+            QMessageBox.critical(self, "保存失败", f"截图保存失败：\n{e}")
+            return
+        finally:
+            self._btn_screenshot.setEnabled(True)
+
+        # 反馈：状态栏显示成功消息，可点击打开文件夹
+        self._label_status.setText(
+            f'截图已保存：<a href="folder">{filename}</a>')
+        self._label_status.setStyleSheet("color: #4CAF50; font-size: 11px;")
+        self._label_status.setOpenExternalLinks(False)
+        try:
+            self._label_status.linkActivated.disconnect()
+        except TypeError:
+            pass  # 未连接过，忽略
+        self._label_status.linkActivated.connect(
+            self._on_open_screenshot_folder)
+
+        # 5 秒后自动清除
+        QTimer.singleShot(5000, lambda: self._label_status.setText(""))
+
+    def _on_open_screenshot_folder(self, _link: str):
+        """在资源管理器中打开截图保存文件夹。"""
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self._screenshot_path))
 
     # ================================================================
     #  绘图调度
@@ -547,6 +665,11 @@ class MainWindow(QMainWindow):
         V = self._trim_V.value()
         W = self._trim_W.value()
         dref = self._trim_dref.value()
+
+        # 持久化用户输入
+        APP_SETTINGS.setValue("trim/V", V)
+        APP_SETTINGS.setValue("trim/W", W)
+        APP_SETTINGS.setValue("trim/dref", dref)
 
         # 获取固定构型 β=0° 数据
         baseline = None
